@@ -26,6 +26,7 @@
 #include <syslog.h>
 #endif
 
+#include "access/nbtree.h"
 #include "access/commit_ts.h"
 #include "access/gin.h"
 #include "access/slru.h"
@@ -770,6 +771,29 @@ StaticAssertDecl(lengthof(config_type_names) == (PGC_ENUM + 1),
 
 struct config_bool ConfigureNamesBool[] =
 {
+	{
+		{"btree_leaf_prefetch",
+		PGC_USERSET,
+		QUERY_TUNING_METHOD,
+		gettext_noop("Prefetches the next leaf page during B-tree index scans."),
+		NULL
+		},
+		&btree_leaf_prefetch,
+		false,
+		NULL, NULL, NULL
+	},
+	{
+		{"btree_binsrch_linear",
+		PGC_USERSET,
+		QUERY_TUNING_METHOD,
+		gettext_noop("Uses linear search for tiny B-tree leaf pages."),
+		NULL
+		},
+		&btree_binsrch_linear,
+		false,
+		NULL, NULL, NULL
+	},
+
 	{
 		{"enable_seqscan", PGC_USERSET, QUERY_TUNING_METHOD,
 			gettext_noop("Enables the planner's use of sequential-scan plans."),
@@ -2035,6 +2059,20 @@ struct config_bool ConfigureNamesBool[] =
 
 struct config_int ConfigureNamesInt[] =
 {
+	{
+		{"btree_binsrch_linear_threshold",
+		PGC_USERSET,
+		QUERY_TUNING_METHOD,
+		gettext_noop("Maximum number of items on a leaf page to use linear search."),
+		NULL
+		},
+		&btree_binsrch_linear_threshold,
+		4,      /* default */
+		1,      /* min */
+		32,     /* max */
+		NULL, NULL, NULL
+	},
+
 	{
 		{"archive_timeout", PGC_SIGHUP, WAL_ARCHIVING,
 			gettext_noop("Sets the amount of time to wait before forcing a "
