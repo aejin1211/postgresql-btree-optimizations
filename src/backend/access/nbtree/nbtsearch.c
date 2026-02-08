@@ -23,6 +23,8 @@
 #include "storage/predicate.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
+#include "storage/bufmgr.h"
+
 
 
 static void _bt_drop_lock_and_maybe_pin(IndexScanDesc scan, BTScanPos sp);
@@ -1936,6 +1938,42 @@ _bt_readpage(IndexScanDesc scan, ScanDirection dir, OffsetNumber offnum,
 		so->currPos.lastItem = MaxTIDsPerBTreePage - 1;
 		so->currPos.itemIndex = MaxTIDsPerBTreePage - 1;
 	}
+	/*
+	 * Leaf-page lookahead prefetch
+	 *
+	 * Spec: inside _bt_readpage "after processing the current page and before
+	 * advancing to a sibling page".
+	 *
+	 * Guard conditions: leaf only; only when scan will continue; only when
+	 * btree_leaf_prefetch is on.
+	 */
+	if (btree_leaf_prefetch && P_ISLEAF(opaque))
+	{
+		BlockNumber sibblk = InvalidBlockNumber;
+
+		/*
+		 * Next-page selection: forward uses "next", backward uses "prev".
+		 * "Scan will continue" is represented by moreRight/moreLeft flags
+		 * that _bt_readpage sets for the caller (_bt_next).
+		 */
+		if (ScanDirectionIsForward(dir))
+		{
+			if (so->currPos.moreRight && !P_RIGHTMOST(opaque))
+				sibblk = opaque->btpo_next;
+		}
+		else
+		{
+			if (so->currPos.moreLeft && !P_LEFTMOST(opaque))
+				sibblk = opaque->btpo_prev;
+		}
+		/*
+		 * Action: schedule a non-blocking I/O hint only.
+		 * Do not change correctness/control flow if skipped/stale.
+		 */
+		if (BlockNumberIsValid(sibblk))
+			PrefetchBuffer(scan->indexRelation, MAIN_FORKNUM, sibblk);
+	}
+
 
 	return (so->currPos.firstItem <= so->currPos.lastItem);
 }
