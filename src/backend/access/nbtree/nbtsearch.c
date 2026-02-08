@@ -369,6 +369,40 @@ _bt_binsrch(Relation rel,
 		return low;
 
 	/*
+	* Use linear search for tiny leaf pages if enabled
+	*/
+	if (btree_binsrch_linear &&
+		P_ISLEAF(opaque))
+	{
+		int nitems = high - low + 1;
+
+		if (nitems >= 2 &&
+			nitems <= btree_binsrch_linear_threshold)
+		{
+			OffsetNumber off;
+			cmpval = key->nextkey ? 0 : 1;
+
+			for (off = low; off <= high; off++)
+			{
+				result = _bt_compare(rel, key, page, off);
+
+				if (result >= cmpval)
+					break;
+			}
+
+			/*
+			* off is now the first slot >= scan key (or > when nextkey)
+			*/
+			if (key->backward)
+				return OffsetNumberPrev(off);
+
+			return off;
+		}
+	}
+
+	
+
+	/*
 	 * Binary search to find the first key on the page >= scan key, or first
 	 * key > scankey when nextkey is true.
 	 *
