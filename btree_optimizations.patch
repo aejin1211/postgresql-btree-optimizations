@@ -1,0 +1,225 @@
+diff --git a/.gitignore b/.gitignore
+index 4e91139..e6c608a 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -3,6 +3,9 @@
+ # be ignored locally using $GIT_DIR/info/exclude or ~/.gitexclude.
+ 
+ # Global excludes across all subdirectories
++bin/postgres
++logfile
++postgres_bin
+ *.o
+ *.obj
+ *.bc
+diff --git a/bin/postgres b/bin/postgres
+deleted file mode 100755
+index 80fff49..0000000
+Binary files a/bin/postgres and /dev/null differ
+diff --git a/include/server/access/nbtree.h b/include/server/access/nbtree.h
+index 7493043..34aba5d 100644
+--- a/include/server/access/nbtree.h
++++ b/include/server/access/nbtree.h
+@@ -1329,4 +1329,9 @@ extern IndexBuildResult *btbuild(Relation heap, Relation index,
+ 								 struct IndexInfo *indexInfo);
+ extern void _bt_parallel_build_main(dsm_segment *seg, shm_toc *toc);
+ 
++/* B-Tree GUC variables */
++extern bool btree_leaf_prefetch;
++extern bool btree_binsrch_linear;
++extern int  btree_binsrch_linear_threshold;
++
+ #endif							/* NBTREE_H */
+diff --git a/src/backend/access/nbtree/nbtsearch.c b/src/backend/access/nbtree/nbtsearch.c
+index e0bbb97..5084db9 100644
+--- a/src/backend/access/nbtree/nbtsearch.c
++++ b/src/backend/access/nbtree/nbtsearch.c
+@@ -23,6 +23,8 @@
+ #include "storage/predicate.h"
+ #include "utils/lsyscache.h"
+ #include "utils/rel.h"
++#include "storage/bufmgr.h"
++
+ 
+ 
+ static void _bt_drop_lock_and_maybe_pin(IndexScanDesc scan, BTScanPos sp);
+@@ -366,6 +368,40 @@ _bt_binsrch(Relation rel,
+ 	if (unlikely(high < low))
+ 		return low;
+ 
++	/*
++	* Use linear search for tiny leaf pages if enabled
++	*/
++	if (btree_binsrch_linear &&
++		P_ISLEAF(opaque))
++	{
++		int nitems = high - low + 1;
++
++		if (nitems >= 2 &&
++			nitems <= btree_binsrch_linear_threshold)
++		{
++			OffsetNumber off;
++			cmpval = key->nextkey ? 0 : 1;
++
++			for (off = low; off <= high; off++)
++			{
++				result = _bt_compare(rel, key, page, off);
++
++				if (result < cmpval)
++					break;
++			}
++
++			/*
++			* off is now the first slot >= scan key (or > when nextkey)
++			*/
++			if (key->backward)
++				return OffsetNumberPrev(off);
++
++			return off;
++		}
++	}
++
++	
++
+ 	/*
+ 	 * Binary search to find the first key on the page >= scan key, or first
+ 	 * key > scankey when nextkey is true.
+@@ -1936,6 +1972,42 @@ _bt_readpage(IndexScanDesc scan, ScanDirection dir, OffsetNumber offnum,
+ 		so->currPos.lastItem = MaxTIDsPerBTreePage - 1;
+ 		so->currPos.itemIndex = MaxTIDsPerBTreePage - 1;
+ 	}
++	/*
++	 * Leaf-page lookahead prefetch
++	 *
++	 * Spec: inside _bt_readpage "after processing the current page and before
++	 * advancing to a sibling page".
++	 *
++	 * Guard conditions: leaf only; only when scan will continue; only when
++	 * btree_leaf_prefetch is on.
++	 */
++	if (btree_leaf_prefetch && P_ISLEAF(opaque))
++	{
++		BlockNumber sibblk = InvalidBlockNumber;
++
++		/*
++		 * Next-page selection: forward uses "next", backward uses "prev".
++		 * "Scan will continue" is represented by moreRight/moreLeft flags
++		 * that _bt_readpage sets for the caller (_bt_next).
++		 */
++		if (ScanDirectionIsForward(dir))
++		{
++			if (so->currPos.moreRight && !P_RIGHTMOST(opaque))
++				sibblk = opaque->btpo_next;
++		}
++		else
++		{
++			if (so->currPos.moreLeft && !P_LEFTMOST(opaque))
++				sibblk = opaque->btpo_prev;
++		}
++		/*
++		 * Action: schedule a non-blocking I/O hint only.
++		 * Do not change correctness/control flow if skipped/stale.
++		 */
++		if (BlockNumberIsValid(sibblk))
++			PrefetchBuffer(scan->indexRelation, MAIN_FORKNUM, sibblk);
++	}
++
+ 
+ 	return (so->currPos.firstItem <= so->currPos.lastItem);
+ }
+diff --git a/src/backend/access/nbtree/nbtutils.c b/src/backend/access/nbtree/nbtutils.c
+index 878f4b2..6e2ec0f 100644
+--- a/src/backend/access/nbtree/nbtutils.c
++++ b/src/backend/access/nbtree/nbtutils.c
+@@ -29,6 +29,14 @@
+ #include "utils/memutils.h"
+ #include "utils/rel.h"
+ 
++/* ----------------------------------------------------------------
++ * B-Tree GUC variables
++ * ----------------------------------------------------------------
++ */
++bool btree_leaf_prefetch = false;
++bool btree_binsrch_linear = false;
++int  btree_binsrch_linear_threshold = 4;
++
+ #define LOOK_AHEAD_REQUIRED_RECHECKS 	3
+ #define LOOK_AHEAD_DEFAULT_DISTANCE 	5
+ 
+diff --git a/src/backend/utils/misc/guc_tables.c b/src/backend/utils/misc/guc_tables.c
+index c42fccf..ed903b2 100644
+--- a/src/backend/utils/misc/guc_tables.c
++++ b/src/backend/utils/misc/guc_tables.c
+@@ -26,6 +26,7 @@
+ #include <syslog.h>
+ #endif
+ 
++#include "access/nbtree.h"
+ #include "access/commit_ts.h"
+ #include "access/gin.h"
+ #include "access/slru.h"
+@@ -770,6 +771,29 @@ StaticAssertDecl(lengthof(config_type_names) == (PGC_ENUM + 1),
+ 
+ struct config_bool ConfigureNamesBool[] =
+ {
++	{
++		{"btree_leaf_prefetch",
++		PGC_USERSET,
++		QUERY_TUNING_METHOD,
++		gettext_noop("Prefetches the next leaf page during B-tree index scans."),
++		NULL
++		},
++		&btree_leaf_prefetch,
++		false,
++		NULL, NULL, NULL
++	},
++	{
++		{"btree_binsrch_linear",
++		PGC_USERSET,
++		QUERY_TUNING_METHOD,
++		gettext_noop("Uses linear search for tiny B-tree leaf pages."),
++		NULL
++		},
++		&btree_binsrch_linear,
++		false,
++		NULL, NULL, NULL
++	},
++
+ 	{
+ 		{"enable_seqscan", PGC_USERSET, QUERY_TUNING_METHOD,
+ 			gettext_noop("Enables the planner's use of sequential-scan plans."),
+@@ -2035,6 +2059,20 @@ struct config_bool ConfigureNamesBool[] =
+ 
+ struct config_int ConfigureNamesInt[] =
+ {
++	{
++		{"btree_binsrch_linear_threshold",
++		PGC_USERSET,
++		QUERY_TUNING_METHOD,
++		gettext_noop("Maximum number of items on a leaf page to use linear search."),
++		NULL
++		},
++		&btree_binsrch_linear_threshold,
++		4,      /* default */
++		1,      /* min */
++		32,     /* max */
++		NULL, NULL, NULL
++	},
++
+ 	{
+ 		{"archive_timeout", PGC_SIGHUP, WAL_ARCHIVING,
+ 			gettext_noop("Sets the amount of time to wait before forcing a "
+diff --git a/src/include/access/nbtree.h b/src/include/access/nbtree.h
+index 7493043..34aba5d 100644
+--- a/src/include/access/nbtree.h
++++ b/src/include/access/nbtree.h
+@@ -1329,4 +1329,9 @@ extern IndexBuildResult *btbuild(Relation heap, Relation index,
+ 								 struct IndexInfo *indexInfo);
+ extern void _bt_parallel_build_main(dsm_segment *seg, shm_toc *toc);
+ 
++/* B-Tree GUC variables */
++extern bool btree_leaf_prefetch;
++extern bool btree_binsrch_linear;
++extern int  btree_binsrch_linear_threshold;
++
+ #endif							/* NBTREE_H */
