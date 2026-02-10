@@ -1,0 +1,25 @@
+From f97b2b410adcc79191e855611293379e56f1b62a Mon Sep 17 00:00:00 2001
+From: aejin1211 <dldowls1211@gmail.com>
+Date: Tue, 10 Feb 2026 07:35:45 +0000
+Subject: [PATCH 5/5] Edit linear search for tiny B-tree leaf pages
+
+---
+ src/backend/access/nbtree/nbtsearch.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/backend/access/nbtree/nbtsearch.c b/src/backend/access/nbtree/nbtsearch.c
+index 5a1b1d1..5084db9 100644
+--- a/src/backend/access/nbtree/nbtsearch.c
++++ b/src/backend/access/nbtree/nbtsearch.c
+@@ -386,7 +386,7 @@ _bt_binsrch(Relation rel,
+ 			{
+ 				result = _bt_compare(rel, key, page, off);
+ 
+-				if (result >= cmpval)
++				if (result < cmpval)
+ 					break;
+ 			}
+ 
+-- 
+2.34.1
+

@@ -1,0 +1,70 @@
+From 9ff32963b3592121442d0447e7742e906e592d41 Mon Sep 17 00:00:00 2001
+From: aejin1211 <dldowls1211@gmail.com>
+Date: Sun, 8 Feb 2026 02:04:17 +0000
+Subject: [PATCH 3/5] Use linear search for tiny B-tree leaf pages
+
+---
+ .gitignore                            |  1 +
+ src/backend/access/nbtree/nbtsearch.c | 34 +++++++++++++++++++++++++++
+ 2 files changed, 35 insertions(+)
+
+diff --git a/.gitignore b/.gitignore
+index 186eac5..e6c608a 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -3,6 +3,7 @@
+ # be ignored locally using $GIT_DIR/info/exclude or ~/.gitexclude.
+ 
+ # Global excludes across all subdirectories
++bin/postgres
+ logfile
+ postgres_bin
+ *.o
+diff --git a/src/backend/access/nbtree/nbtsearch.c b/src/backend/access/nbtree/nbtsearch.c
+index 6da92c7..5a1b1d1 100644
+--- a/src/backend/access/nbtree/nbtsearch.c
++++ b/src/backend/access/nbtree/nbtsearch.c
+@@ -368,6 +368,40 @@ _bt_binsrch(Relation rel,
+ 	if (unlikely(high < low))
+ 		return low;
+ 
++	/*
++	* Use linear search for tiny leaf pages if enabled
++	*/
++	if (btree_binsrch_linear &&
++		P_ISLEAF(opaque))
++	{
++		int nitems = high - low + 1;
++
++		if (nitems >= 2 &&
++			nitems <= btree_binsrch_linear_threshold)
++		{
++			OffsetNumber off;
++			cmpval = key->nextkey ? 0 : 1;
++
++			for (off = low; off <= high; off++)
++			{
++				result = _bt_compare(rel, key, page, off);
++
++				if (result >= cmpval)
++					break;
++			}
++
++			/*
++			* off is now the first slot >= scan key (or > when nextkey)
++			*/
++			if (key->backward)
++				return OffsetNumberPrev(off);
++
++			return off;
++		}
++	}
++
++	
++
+ 	/*
+ 	 * Binary search to find the first key on the page >= scan key, or first
+ 	 * key > scankey when nextkey is true.
+-- 
+2.34.1
+
