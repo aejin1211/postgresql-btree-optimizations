@@ -386,7 +386,7 @@ _bt_binsrch(Relation rel,
 			{
 				result = _bt_compare(rel, key, page, off);
 
-				if (result >= cmpval)
+				if (result < cmpval)
 					break;
 			}
 
